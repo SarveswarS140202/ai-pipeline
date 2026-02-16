@@ -4,14 +4,25 @@ import sqlite3
 from datetime import datetime
 from fastapi import FastAPI
 from pydantic import BaseModel
-from dotenv import load_dotenv
 from openai import OpenAI
+from fastapi.middleware.cors import CORSMiddleware
 
-load_dotenv()
-
+# -----------------------
+# App Setup
+# -----------------------
 app = FastAPI()
-client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 
+# Enable CORS (VERY IMPORTANT for Render evaluation)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# OpenAI Client
+client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 
 DB_NAME = "pipeline.db"
 
@@ -36,6 +47,9 @@ def init_db():
 
 init_db()
 
+# -----------------------
+# Request Schema
+# -----------------------
 class PipelineRequest(BaseModel):
     email: str
     source: str
@@ -46,11 +60,14 @@ class PipelineRequest(BaseModel):
 def analyze_text(text):
     try:
         prompt = f"""
-        Analyze this data in 2 sentences and classify sentiment as enthusiastic, critical, or objective:
+        Analyze this data in 2 sentences and classify sentiment as enthusiastic, critical, or objective.
+        Respond strictly in this format:
+
+        Summary: <your summary>
+        Sentiment: <enthusiastic/critical/objective>
+
+        Data:
         {text}
-        Return format:
-        Summary: ...
-        Sentiment: ...
         """
 
         response = client.chat.completions.create(
@@ -67,7 +84,12 @@ def analyze_text(text):
             if line.lower().startswith("summary:"):
                 summary = line.replace("Summary:", "").strip()
             if line.lower().startswith("sentiment:"):
-                sentiment = line.replace("Sentiment:", "").strip().lower()
+                sentiment = (
+                    line.replace("Sentiment:", "")
+                    .strip()
+                    .lower()
+                    .replace(".", "")
+                )
 
         return summary, sentiment
 
@@ -97,6 +119,13 @@ def store_result(original, analysis, sentiment, source):
         return False, str(e)
 
 # -----------------------
+# Optional Root Route
+# -----------------------
+@app.get("/")
+def root():
+    return {"message": "AI Pipeline is running."}
+
+# -----------------------
 # Pipeline Endpoint
 # -----------------------
 @app.post("/pipeline")
@@ -105,7 +134,9 @@ def run_pipeline(request: PipelineRequest):
     items_output = []
     errors = []
 
-    # API Fetch
+    # -----------------------
+    # Stage 1: Fetch API Data
+    # -----------------------
     try:
         response = requests.get(
             "https://jsonplaceholder.typicode.com/users",
@@ -121,17 +152,21 @@ def run_pipeline(request: PipelineRequest):
             "errors": [f"API Fetch Error: {str(e)}"]
         }
 
+    # -----------------------
     # Process Each User
+    # -----------------------
     for user in users:
         try:
             original_text = str(user)
 
+            # AI Analysis
             summary, sentiment = analyze_text(original_text)
 
             if summary is None:
                 errors.append(sentiment)
                 continue
 
+            # Storage
             stored, timestamp_or_error = store_result(
                 original_text,
                 summary,
@@ -155,13 +190,15 @@ def run_pipeline(request: PipelineRequest):
             errors.append(f"Processing Error: {str(e)}")
             continue
 
+    # -----------------------
     # Notification (Mock)
+    # -----------------------
     try:
         print("Notification sent to: 24f2009044@ds.study.iitm.ac.in")
         notification_sent = True
     except Exception as e:
         notification_sent = False
-        errors.append(str(e))
+        errors.append(f"Notification Error: {str(e)}")
 
     return {
         "items": items_output,
